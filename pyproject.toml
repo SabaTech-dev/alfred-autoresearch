@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "autoresearch"
-version = "1.1.0"
+version = "1.2.0"
 description = "Standalone Python SDK for autonomous experiment loops — try ideas, keep what works, discard what doesn't."
 readme = "README.md"
 license = "MIT"
@@ -47,9 +47,9 @@ mcp = [
 autoresearch = "autoresearch.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/llllJokerllll/alfred-autoresearch"
-Repository = "https://github.com/llllJokerllll/alfred-autoresearch"
-Issues = "https://github.com/llllJokerllll/alfred-autoresearch/issues"
+Homepage = "https://github.com/SabaTech-dev/alfred-autoresearch"
+Repository = "https://github.com/SabaTech-dev/alfred-autoresearch"
+Issues = "https://github.com/SabaTech-dev/alfred-autoresearch/issues"
 
 [tool.ruff]
 line-length = 100

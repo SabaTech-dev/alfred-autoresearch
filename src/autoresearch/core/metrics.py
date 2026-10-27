@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 
 # Pattern: METRIC name=value (supports integers, floats, scientific notation, unicode µ)
@@ -30,7 +31,7 @@ def parse_metric_lines(output: str) -> dict[str, float]:
         if match:
             name = match.group(1)
             value = float(match.group(2))
-            if name and value == value:  # not NaN
+            if name and not math.isnan(value):
                 metrics[name] = value
     return metrics
 

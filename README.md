@@ -12,10 +12,12 @@ Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch) an
 
 ## Features
 
-- 🔄 **Experiment Loop Engine** — init → run → log → improve → repeat
+- 🔄 **Experiment Loop Engine** — init → run → log → improve → repeat (a PDCA loop: plan/description, do/run, check/confidence, act/keep-discard)
 - 📊 **Statistical Confidence** — MAD-based noise floor to distinguish real improvements from noise
-- 📝 **Ideas Backlog** — Failed experiments automatically generate ideas for future exploration
+- 📝 **Ideas Backlog** — Failed experiments automatically generate ideas for future exploration (deduplicated)
 - 📈 **State Persistence** — JSONL results log, survives restarts
+- 📄 **Session Reports** — `autoresearch report` regenerates a Markdown summary of everything tried
+- 🤖 **Agent-friendly** — `status --json` for machine-readable state
 - 🛠️ **CLI** — Full command-line interface with rich output
 - 🐍 **Pure Python** — Zero external dependencies required (only `rich` + `click`)
 - 📦 **OpenClaw Compatible** — Same JSONL format as the OpenClaw AutoResearch plugin
@@ -48,8 +50,15 @@ autoresearch log -d "Added caching layer"
 autoresearch run -c "./benchmark.sh"
 autoresearch log -s discard -d "Thread pool didn't help" -i "Try async I/O instead"
 
-# Check status
+# Check status (human or machine-readable)
 autoresearch status
+autoresearch status --json
+
+# Review the ideas backlog (deduplicated)
+autoresearch ideas
+
+# Regenerate the session report (autoresearch.md)
+autoresearch report
 ```
 
 ### Python API
@@ -167,10 +176,20 @@ autoresearch/
 │   ├── utils/
 │   └── metrics/
 ├── tests/
-│   └── test_autoresearch.py
+│   ├── test_autoresearch.py  # Engine, confidence, metrics, ideas, report
+│   └── test_cli.py           # CLI end-to-end
+├── docs/
+│   ├── arquitectura.md    # Architecture review + ADRs (Spanish)
+│   ├── roadmap.md         # Prioritized roadmap: multi-agent / CLI / PDCA-Kaizen
+│   └── manual_usuario.md  # User guide (Spanish)
+├── CHANGELOG.md
 ├── pyproject.toml
 └── README.md
 ```
+
+See `docs/arquitectura.md` for the full architecture review and `docs/roadmap.md`
+for the prioritized improvement proposal (multi-agent generalization, reusable
+CLI, integrated PDCA/Kaizen cycles).
 
 ## Comparison with OpenClaw AutoResearch Plugin
 

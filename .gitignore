@@ -19,3 +19,4 @@ autoresearch.ideas.md
 *.swp
 *.swo
 *~
+.atl/

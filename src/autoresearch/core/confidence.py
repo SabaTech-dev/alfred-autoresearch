@@ -20,9 +20,7 @@ def compute_confidence(
         None if not enough runs (< 3) or MAD is zero.
     """
     usable = [
-        r for r in runs
-        if isinstance(r.get("metric"), (int, float))
-        and float(r["metric"]) > 0
+        r for r in runs if isinstance(r.get("metric"), (int, float)) and float(r["metric"]) > 0
     ]
     if len(usable) < 3:
         return None
