@@ -1,15 +1,58 @@
 """Tests for AutoResearch SDK."""
 
-import json
-import os
-import tempfile
-from pathlib import Path
-
 import pytest
 
-from autoresearch import AutoResearch, compute_confidence, describe_confidence, parse_metric_lines
+from autoresearch import describe_confidence, parse_metric_lines
 from autoresearch.core.confidence import compute_confidence as cc
-from autoresearch.core.engine import AutoResearch as AR, Direction, Run, RunStatus
+from autoresearch.core.engine import AutoResearch as AR
+from autoresearch.core.engine import Direction, RunStatus
+
+
+class TestIdeasDedup:
+    def test_duplicate_ideas_appended_once(self, tmp_path):
+        ar = AR(name="dedup", metric="score", cwd=tmp_path)
+        ar.init()
+        ar.run('echo "METRIC score=100"')
+        ar.discard_with_idea("first", "try caching instead")
+        ar.run('echo "METRIC score=110"')
+        ar.discard_with_idea("second", "try caching instead")
+
+        content = (tmp_path / ar.IDEAS_FILE).read_text()
+        assert content.count("try caching instead") == 1
+
+    def test_distinct_ideas_all_kept(self, tmp_path):
+        ar = AR(name="dedup", metric="score", cwd=tmp_path)
+        ar.init()
+        ar.run('echo "METRIC score=100"')
+        ar.discard_with_idea("first", "try caching instead")
+        ar.run('echo "METRIC score=110"')
+        ar.discard_with_idea("second", "try connection pooling")
+
+        content = (tmp_path / ar.IDEAS_FILE).read_text()
+        assert "try caching instead" in content
+        assert "try connection pooling" in content
+
+
+class TestReport:
+    def test_generate_report_markdown(self, tmp_path):
+        ar = AR(name="report-exp", metric="score", direction="lower", unit="ms", cwd=tmp_path)
+        ar.init()
+        ar.run('echo "METRIC score=100"')
+        ar.log("baseline")
+        ar.run('echo "METRIC score=60"')
+        ar.log("after tuning")
+
+        report = ar.generate_report()
+        assert "# Autoresearch: report-exp" in report
+        assert "**Primary**: score (ms, lower is better)" in report
+        assert "baseline" in report
+        assert "after tuning" in report
+        assert "Best" in report
+
+    def test_generate_report_uninitialized(self, tmp_path):
+        ar = AR(name="x", metric="score", cwd=tmp_path)
+        with pytest.raises(RuntimeError, match="Not initialized"):
+            ar.generate_report()
 
 
 class TestMetricParsing:
@@ -210,10 +253,14 @@ class TestEngine:
     def test_get_best_run(self, tmp_path):
         ar = self._make_ar(tmp_path)
         ar.init()
-        ar.run('echo "METRIC score=100"'); ar.log("baseline")
-        ar.run('echo "METRIC score=80"'); ar.log("try 1")
-        ar.run('echo "METRIC score=50"'); ar.log("try 2")
-        ar.run('echo "METRIC score=60"'); ar.log("try 3")
+        ar.run('echo "METRIC score=100"')
+        ar.log("baseline")
+        ar.run('echo "METRIC score=80"')
+        ar.log("try 1")
+        ar.run('echo "METRIC score=50"')
+        ar.log("try 2")
+        ar.run('echo "METRIC score=60"')
+        ar.log("try 3")
 
         best = ar.get_best_run()
         assert best is not None
@@ -233,8 +280,10 @@ class TestEngine:
     def test_higher_direction(self, tmp_path):
         ar = AR(name="test", metric="score", direction="higher", cwd=tmp_path)
         ar.init()
-        ar.run('echo "METRIC score=10"'); ar.log("baseline")
-        ar.run('echo "METRIC score=100"'); ar.log("improvement")
+        ar.run('echo "METRIC score=10"')
+        ar.log("baseline")
+        ar.run('echo "METRIC score=100"')
+        ar.log("improvement")
         assert ar.best_metric == 100.0
 
     def test_confidence_computed(self, tmp_path):
@@ -247,6 +296,53 @@ class TestEngine:
 
         assert ar.confidence is not None
         assert ar.confidence >= 1.0
+
+    def test_log_honors_status_without_description(self, tmp_path):
+        """Regression: log(status=...) without description ignored the status.
+
+        A passing run logged with status="discard" and no description was
+        recorded as "keep", polluting best_metric with a discarded result.
+        """
+        ar = self._make_ar(tmp_path)
+        ar.init()
+        ar.run('echo "METRIC score=100"')
+        run = ar.log(status="discard")
+
+        assert run.status == RunStatus.DISCARD
+        assert ar.best_metric is None  # discarded run must not become best
+
+    def test_log_default_description_when_status_given(self, tmp_path):
+        ar = self._make_ar(tmp_path)
+        ar.init()
+        ar.run('echo "METRIC score=100"')
+        run = ar.log(status="keep")
+
+        assert run.status == RunStatus.KEEP
+        assert run.description  # non-empty default, not ""
+
+    def test_unnamed_experiment_resumes_config_from_file(self, tmp_path):
+        """Regression: config entries without a name skipped config restore.
+
+        A config persisted as {"name": null} (unnamed experiment) did not
+        restore metricName/bestDirection from the file, so constructor
+        arguments silently won on resume — e.g. a wrong direction could
+        flip the meaning of "best" without any error.
+        """
+        ar1 = AR(name="", metric="score", direction="lower", cwd=tmp_path)
+        ar1.init()
+        ar1.run('echo "METRIC score=100"')
+        ar1.log("baseline")
+
+        # Resume with WRONG constructor args: the file must win.
+        ar2 = AR(name="", metric="wrong_metric", direction="higher", cwd=tmp_path)
+        assert ar2.is_initialized
+        assert ar2.total_runs == 1
+        assert ar2.config.metric_name == "score"
+        assert ar2.config.best_direction == Direction.LOWER
+        ar2.run('echo "METRIC score=50"')
+        ar2.log("improvement after resume")
+        # direction=lower from file: 50 < 100 baseline is the improvement
+        assert ar2.best_metric == 50.0
 
 
 if __name__ == "__main__":
