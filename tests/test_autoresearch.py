@@ -1,6 +1,8 @@
 """Tests for AutoResearch SDK."""
 
 import json
+import subprocess
+import sys
 
 import pytest
 
@@ -427,3 +429,66 @@ class TestNoMetricRun:
         ar.run("echo no metric here")
         ar.log("silent run must not pollute best")
         assert ar.best_metric == 100.0
+
+
+class TestPendingIsolationAndLocking:
+    """T3/S2: per-agent pending files and fcntl locking."""
+
+    def test_pending_file_per_agent(self, tmp_path):
+        ar = AR(name="iso", metric="score", cwd=tmp_path, agent="coder")
+        ar.init()
+        ar.run('echo "METRIC score=100"')
+        expected = tmp_path / ".autoresearch.pending.coder.json"
+        assert expected.exists()
+        assert not (tmp_path / ".autoresearch.pending.json").exists()
+
+    def test_agent_does_not_inherit_foreign_pending(self, tmp_path):
+        """AC run #81: agent b must never flush agent a's pending run."""
+        a = AR(name="iso", metric="score", cwd=tmp_path, agent="a")
+        a.init()
+        a.run('echo "METRIC score=100"')
+        assert a.has_pending
+
+        b = AR(name="iso", metric="score", cwd=tmp_path, agent="b")
+        assert not b.has_pending
+        # b shares the initialized experiment and runs without touching a's pending
+        b.run('echo "METRIC score=200"')
+        assert a.has_pending
+        run_a = a.log("a's run survives")
+        assert run_a.metric == 100.0
+
+    def test_legacy_agentless_pending_still_loads(self, tmp_path):
+        ar = AR(name="iso", metric="score", cwd=tmp_path)
+        ar.init()
+        ar.run('echo "METRIC score=100"')
+        ar2 = AR(cwd=tmp_path)
+        assert ar2.has_pending
+
+    def test_two_processes_no_lost_runs(self, tmp_path):
+        """AC: 2 processes interleaving run/log lose no runs."""
+        script = (
+            "import sys\n"
+            "from autoresearch import AutoResearch\n"
+            "ar = AutoResearch(cwd=sys.argv[1], agent=sys.argv[2])\n"
+            "for i in range(10):\n"
+            "    ar.run('echo \"METRIC score=%d\"' % i)\n"
+            "    ar.log('run %d by %s' % (i, sys.argv[2]))\n"
+        )
+        script_path = tmp_path / "worker.py"
+        script_path.write_text(script)
+        ar0 = AR(name="conc", metric="score", cwd=tmp_path)
+        ar0.init()
+        procs = [
+            subprocess.Popen(
+                [sys.executable, str(script_path), str(tmp_path), agent],
+                cwd="/home/joker/repos/alfred-autoresearch",
+            )
+            for agent in ("a", "b")
+        ]
+        for p in procs:
+            assert p.wait() == 0
+        ar_final = AR(cwd=tmp_path)
+        assert ar_final.total_runs == 20
+        agents = {r.agent for r in ar_final.runs}
+        assert agents == {"a", "b"}
+        assert not ar_final.has_pending

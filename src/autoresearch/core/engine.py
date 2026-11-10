@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import subprocess
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -135,6 +137,7 @@ class AutoResearch:
     IDEAS_FILE = "autoresearch.ideas.md"
     SESSION_DOC = "autoresearch.md"
     CHECKPOINT_FILE = "autoresearch.checkpoint.json"
+    LOCK_FILE = ".autoresearch.lock"
 
     def __init__(
         self,
@@ -489,6 +492,27 @@ class AutoResearch:
 
     # --- Internal ---
 
+    @contextmanager
+    def _locked(self):
+        """Exclusive inter-process lock around state mutations (fcntl).
+
+        Multiple agents sharing one experiment directory interleave appends
+        and pending read-modify-write; the lock keeps those atomic.
+        """
+        lock_path = self._cwd / self.LOCK_FILE
+        with open(lock_path, "a") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+    def _pending_path(self) -> Path:
+        """Pending file for this agent; agentless runs keep the legacy name."""
+        if self._agent:
+            return self._cwd / f".autoresearch.pending.{self._agent}.json"
+        return self._cwd / ".autoresearch.pending.json"
+
     def _is_better(self, current: float, best: float) -> bool:
         return current < best if self._config.best_direction == Direction.LOWER else current > best
 
@@ -518,7 +542,7 @@ class AutoResearch:
 
     def _append_results(self, entry: dict[str, Any]) -> None:
         path = self._cwd / self.RESULTS_LOG
-        with open(path, "a") as f:
+        with self._locked(), open(path, "a") as f:
             f.write(json.dumps(entry) + "\n")
 
     def _append_idea(self, idea: str) -> None:
@@ -583,14 +607,15 @@ class AutoResearch:
             json.dump(checkpoint, f, indent=2)
 
     def _persist_pending(self, run: Run) -> None:
-        path = self._cwd / ".autoresearch.pending.json"
-        with open(path, "w") as f:
+        path = self._pending_path()
+        with self._locked(), open(path, "w") as f:
             json.dump(run.to_dict(), f, indent=2)
 
     def _clear_pending(self) -> None:
-        path = self._cwd / ".autoresearch.pending.json"
-        if path.exists():
-            path.unlink()
+        path = self._pending_path()
+        with self._locked():
+            if path.exists():
+                path.unlink()
 
     def _load_state(self) -> None:
         """Load existing state from results log and checkpoint."""
@@ -675,7 +700,7 @@ class AutoResearch:
         self._load_pending()
 
     def _load_pending(self) -> None:
-        path = self._cwd / ".autoresearch.pending.json"
+        path = self._pending_path()
         if not path.exists():
             return
         try:
