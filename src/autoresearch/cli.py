@@ -56,16 +56,41 @@ def init(name: str, metric: str, direction: str, unit: str, reset: bool, cwd: st
 @main.command()
 @click.option("--command", "-c", required=True, help="Benchmark command to run")
 @click.option("--timeout", "-t", default=600, help="Timeout in seconds")
+@click.option("--agent", "-a", default=None, help="Agent id isolating this run's pending state")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
 @click.option("--cwd", "-C", type=click.Path(exists=True), default=".", help="Working directory")
-def run(command: str, timeout: int, cwd: str) -> None:
+def run(command: str, timeout: int, agent: str | None, as_json: bool, cwd: str) -> None:
     """Run a benchmark command and capture metrics."""
-    ar = AutoResearch(cwd=Path(cwd))
+    ar = AutoResearch(cwd=Path(cwd), agent=agent)
     if not ar.is_initialized:
-        console.print("[red]✗[/red] Not initialized. Run 'autoresearch init' first.")
+        if as_json:
+            click.echo(json.dumps({"error": "not_initialized"}))
+        else:
+            console.print("[red]✗[/red] Not initialized. Run 'autoresearch init' first.")
         sys.exit(1)
 
-    console.print(f"[dim]Running: {command}[/dim]")
+    if not as_json:
+        console.print(f"[dim]Running: {command}[/dim]")
     result = ar.run(command, timeout=timeout)
+
+    if as_json:
+        from autoresearch.core.metrics import parse_metric_lines
+
+        click.echo(
+            json.dumps(
+                {
+                    "command": result.command,
+                    "exit_code": result.exit_code,
+                    "duration_seconds": result.duration_seconds,
+                    "passed": result.passed,
+                    "crashed": result.crashed,
+                    "timed_out": result.timed_out,
+                    "metrics": parse_metric_lines(result.combined_output),
+                    "has_pending": ar.has_pending,
+                }
+            )
+        )
+        return
 
     if result.timed_out:
         console.print(f"[red]✗ Timed out after {result.duration_seconds:.1f}s[/red]")
@@ -103,11 +128,18 @@ def run(command: str, timeout: int, cwd: str) -> None:
     help="Run status (default: keep if passed)",
 )
 @click.option("--idea", "-i", default="", help="Idea for future (only with discard)")
+@click.option("--agent", "-a", default=None, help="Agent id isolating this run's pending state")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
 @click.option("--cwd", "-C", type=click.Path(exists=True), default=".", help="Working directory")
-def log(description: str, status: str | None, idea: str, cwd: str) -> None:
+def log(
+    description: str, status: str | None, idea: str, agent: str | None, as_json: bool, cwd: str
+) -> None:
     """Log the pending run result."""
-    ar = AutoResearch(cwd=Path(cwd))
+    ar = AutoResearch(cwd=Path(cwd), agent=agent)
     if not ar.has_pending:
+        if as_json:
+            click.echo(json.dumps({"error": "no_pending_run"}))
+            sys.exit(1)
         console.print("[red]✗ No pending run. Run 'autoresearch run' first.[/red]")
         sys.exit(1)
 
@@ -118,6 +150,10 @@ def log(description: str, status: str | None, idea: str, cwd: str) -> None:
         logged = ar.discard_with_idea(description or "Discarded", idea)
     else:
         logged = ar.log(description=description, status=status)
+
+    if as_json:
+        click.echo(json.dumps(logged.to_dict()))
+        return
 
     emoji = {"keep": "✅", "discard": "❌", "crash": "💥"}.get(logged.status.value, "?")
     console.print(f"{emoji} Run #{logged.run} logged — {logged.status.value}")
@@ -182,7 +218,8 @@ def status(cwd: str, as_json: bool) -> None:
 
 @main.command()
 @click.option("--cwd", "-C", type=click.Path(exists=True), default=".", help="Working directory")
-def ideas(cwd: str) -> None:
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+def ideas(cwd: str, as_json: bool) -> None:
     """Show the ideas backlog (lessons from discarded experiments)."""
     ar = AutoResearch(cwd=Path(cwd))
     ideas_path = ar.cwd / ar.IDEAS_FILE
@@ -192,6 +229,10 @@ def ideas(cwd: str) -> None:
             line = line.strip()
             if line.startswith("- "):
                 entries.append(line[2:])
+
+    if as_json:
+        click.echo(json.dumps({"ideas": entries, "count": len(entries)}))
+        return
 
     if not entries:
         console.print(
@@ -208,15 +249,22 @@ def ideas(cwd: str) -> None:
 
 @main.command()
 @click.option("--cwd", "-C", type=click.Path(exists=True), default=".", help="Working directory")
-def report(cwd: str) -> None:
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+def report(cwd: str, as_json: bool) -> None:
     """Write the session report (autoresearch.md) from recorded runs."""
     ar = AutoResearch(cwd=Path(cwd))
     if not ar.is_initialized:
+        if as_json:
+            click.echo(json.dumps({"error": "not_initialized"}))
+            sys.exit(1)
         console.print("[red]✗ Not initialized. Run 'autoresearch init' first.[/red]")
         sys.exit(1)
 
     report_path = ar.cwd / ar.SESSION_DOC
     report_path.write_text(ar.generate_report())
+    if as_json:
+        click.echo(json.dumps({"written": True, "path": str(report_path)}))
+        return
     console.print(f"[green]✓[/green] Report written to {report_path}")
 
 
