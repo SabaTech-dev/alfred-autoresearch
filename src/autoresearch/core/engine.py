@@ -251,6 +251,9 @@ class AutoResearch:
         # Write config entry
         self._append_results(self._config.to_dict())
         self._initialized = True
+        from autoresearch.registry import register
+
+        register(self._cwd, self._config.name, self._config.metric_name)
 
     def run(
         self,

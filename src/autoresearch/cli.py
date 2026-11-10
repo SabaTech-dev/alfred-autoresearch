@@ -222,6 +222,28 @@ def report(cwd: str) -> None:
 
 @main.command()
 @click.option("--cwd", "-C", type=click.Path(exists=True), default=".", help="Working directory")
+def experiments(cwd: str) -> None:
+    """List known experiments from the optional registry."""
+    from autoresearch.registry import list_experiments
+
+    entries = list_experiments()
+    if not entries:
+        console.print("[dim]No registered experiments.[/dim]")
+        return
+    table = Table(title="Experiments")
+    table.add_column("Name", style="cyan")
+    table.add_column("Metric", style="green")
+    table.add_column("Updated", style="dim")
+    table.add_column("Directory", style="dim")
+    for e in entries:
+        table.add_row(
+            e.get("name") or "-", e.get("metric_name") or "-", e.get("updated_at", ""), e["cwd"]
+        )
+    console.print(table)
+
+
+@main.command()
+@click.option("--cwd", "-C", type=click.Path(exists=True), default=".", help="Working directory")
 def export(cwd: str) -> None:
     """Export experiment results as JSON."""
     ar = AutoResearch(cwd=Path(cwd))
