@@ -36,14 +36,14 @@ S9. NO reintroducir CI self-hosted. Sin PR/merge (decisión del dueño).
 
 ## Tasks
 
-- T1 [S1,S4] `agent` field: Run.agent, to_dict/load, engine acepta agent, get_status lo expone; fixtures plugin viejo siguen cargando. (inline)
-- T2 [S7] Run sin METRIC → status `no-metric` (RunStatus nuevo, aditivo) en vez de 0.0 silencioso; test distingue crash de sin-métrica. (inline)
-- T3 [S2] fcntl lock en read-modify-write del pending; pending por agente; test concurrencia 2 procesos (subprocess). (inline)
-- T4 [S3] Registry opcional AUTORESEARCH_HOME + comando `experiments`. (inline)
-- T5 [S4] CLI `--agent` en run/log/status; status lo muestra. (inline)
-- T6 [S5] `--json` global en run/log/ideas/report + exit codes 0/1/2 documentados. (inline)
-- T7 [S6] Runners: Protocol Runner, SubprocessRunner (default), CallableRunner, CommandRunner (env/timeout enriquecidos); benchmark callable in-process test. (inline)
-- T8 [S8,S9] Docs: CHANGELOG (migration notes), manual_usuario, README, bump v1.3.0. (inline)
+- T1 [S1,S4] DONE commit 4afbd89 (RED->GREEN, +JSON plano status/export). (inline)
+- T2 [S7] DONE commit 4afbd89 (RED->GREEN). (inline)
+- T3 [S2] DONE commit c7e32f3 (test 2 procesos x 10 runs, 0 perdidos, pending aislado). (inline)
+- T4 [S3] DONE commit 35177ee. (inline)
+- T5 [S4] DONE commit 05793ce. (inline)
+- T6 [S5] DONE commit 05793ce (exit 1 not_initialized/no_pending_run, exit 2 click). (inline)
+- T7 [S6] DONE commit d0fc084. (inline)
+- T8 [S8,S9] DONE commit 596eebd (v1.3.0, migration notes). (inline)
 
 ## Verification
 
@@ -61,3 +61,9 @@ cd ~/repos/alfred-autoresearch && .venv/bin/python -m pytest tests/ -q --cov=aut
   acpx-status: LIMPIO. Card movida a running vía `openclaw workboard move`
   (claim-token no disponible para agentes OpenCode — desviación ya documentada
   en card 8d5c3dd8).
+
+- L2 (2026-11-10): Ejecución completa T1-T8. Suite 80 passed, cobertura 90%,
+  ruff check+format limpios. Smoke CLI --json/agent/experiments OK
+  (/tmp/opencode/ar-smoke13). 3 fallos preexistentes en la base (rich colorizaba
+  status --json/export) corregidos en 4afbd89. Rama pusheada a origin; sin PR ni
+  merge (decisión del dueño). Movida a review.
