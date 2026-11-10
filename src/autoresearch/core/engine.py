@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import fcntl
 import json
-import os
 import subprocess
-import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from autoresearch.runners import Runner
 
 from autoresearch.core.confidence import compute_confidence, describe_confidence
 from autoresearch.core.metrics import parse_metric_lines
@@ -148,6 +149,7 @@ class AutoResearch:
         cwd: str | Path | None = None,
         timeout: int = DEFAULT_TIMEOUT,
         agent: str | None = None,
+        runner: Runner | None = None,
         secondary_metrics: list[SecondaryMetricDef] | None = None,
         files_in_scope: list[str] | None = None,
         off_limits: list[str] | None = None,
@@ -166,6 +168,9 @@ class AutoResearch:
         )
         self._timeout = timeout
         self._agent = agent
+        from autoresearch.runners import SubprocessRunner
+
+        self._runner: Runner = runner if runner is not None else SubprocessRunner()
         self._runs: list[Run] = []
         self._pending: Run | None = None
         self._current_segment = 0
@@ -285,39 +290,19 @@ class AutoResearch:
             raise RuntimeError("Pending run exists. Call log() first.")
 
         timeout = timeout or self._timeout
-        cmd_env = os.environ.copy()
-        if env:
-            cmd_env.update(env)
+        result = self._runner.execute(command, timeout=timeout, cwd=self._cwd, env=env)
 
-        started = time.monotonic()
-        try:
-            proc = subprocess.run(
-                ["bash", "-c", command],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=str(self._cwd),
-                env=cmd_env,
-                check=False,  # exit code is captured as part of the run result
-            )
-            exit_code = proc.returncode
-            timed_out = False
-            stdout = proc.stdout
-            stderr = proc.stderr
-        except subprocess.TimeoutExpired as e:
-            exit_code = None
-            timed_out = True
-            stdout = e.stdout or ""
-            stderr = e.stderr or ""
-
-        duration = time.monotonic() - started
-        passed = exit_code == 0 and not timed_out
-        crashed = not passed
+        exit_code = result.exit_code
+        timed_out = result.timed_out
+        stdout = result.stdout
+        stderr = result.stderr
+        passed = result.passed
+        crashed = result.crashed
 
         result = ExecutionResult(
             command=command,
             exit_code=exit_code,
-            duration_seconds=duration,
+            duration_seconds=result.duration_seconds,
             passed=passed,
             crashed=crashed,
             timed_out=timed_out,
