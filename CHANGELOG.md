@@ -3,6 +3,40 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/),
 versionado [SemVer](https://semver.org/lang/es/).
 
+## [1.3.0] — 2026-11-10
+
+### Añadido (quickwins P1 del roadmap — card 3b4075eb)
+
+- **Campo `agent` en el schema JSONL** (aditivo, opcional, default `null`): los
+  runs registran qué agente los produjo. *Migration note*: los ficheros JSONL
+  del plugin OpenClaw sin el campo siguen cargando sin cambios.
+- **Locking inter-proceso**: lock exclusivo fcntl (`.autoresearch.lock`) en
+  torno a los appends del JSONL y la persistencia del pending; múltiples
+  agentes ya no pierden runs por appends intercalados.
+- **Pending por agente** (`.autoresearch.pending.<agent>.json`): un agente
+  nunca hereda ni descarta el pending de otro (bug del run #81 del plugin).
+  Los runs sin agente mantienen el nombre legado `.autoresearch.pending.json`.
+- **Registry opcional**: `~/.autoresearch/registry.json` (o `$AUTORESEARCH_HOME`)
+  registra experimentos conocidos; nuevo comando `autoresearch experiments`.
+  El registro es best-effort: el modo cwd-only funciona sin registry.
+- **CLI `--agent <id>`** en `run` y `log`; `status --json` lo expone.
+- **CLI `--json` global** en `run`, `log`, `ideas` y `report`: salida JSON sin
+  color, con exit codes documentados (0 ok, 1 sin estado
+  `not_initialized`/`no_pending_run`, 2 uso inválido).
+- **Runners pluggables** (`autoresearch.runners`): protocolo `Runner`
+  (cualquier objeto con `execute()`), `SubprocessRunner` (default histórico),
+  `CallableRunner` (benchmark Python in-process) y `CommandRunner` (comando
+  fijo con env/timeout enriquecidos).
+- `status --json` y `export` emiten JSON plano sin colorear (antes rich podía
+  colorear y romper el parseo por agentes).
+
+### Corregido
+
+- Un run que pasa sin reportar la métrica primaria se registra como
+  `status=no-metric` en vez de un 0.0 silencioso (P-3); `best_metric` lo ignora.
+  *Migration note*: el valor `no-metric` es nuevo en el campo `status`; los
+  consumidores del JSONL deben tratarlo como run sin métrica.
+
 ## [1.2.0] — 2026-10-27
 
 ### Añadido

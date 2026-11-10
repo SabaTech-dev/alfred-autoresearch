@@ -17,7 +17,9 @@ Inspired by [karpathy/autoresearch](https://github.com/karpathy/autoresearch) an
 - 📝 **Ideas Backlog** — Failed experiments automatically generate ideas for future exploration (deduplicated)
 - 📈 **State Persistence** — JSONL results log, survives restarts
 - 📄 **Session Reports** — `autoresearch report` regenerates a Markdown summary of everything tried
-- 🤖 **Agent-friendly** — `status --json` for machine-readable state
+- 🤖 **Agent-friendly** — `--json` on every command with documented exit codes (0 ok / 1 no state / 2 usage)
+- 👥 **Multi-agent** — `--agent <id>` isolates pending state per agent; fcntl locking keeps concurrent appends safe
+- 🔌 **Pluggable runners** — subprocess (default), in-process Python callables, or fixed commands with enriched env/timeout
 - 🛠️ **CLI** — Full command-line interface with rich output
 - 🐍 **Pure Python** — Zero external dependencies required (only `rich` + `click`)
 - 📦 **OpenClaw Compatible** — Same JSONL format as the OpenClaw AutoResearch plugin
@@ -59,6 +61,30 @@ autoresearch ideas
 
 # Regenerate the session report (autoresearch.md)
 autoresearch report
+
+# Multi-agent: isolated pending per agent
+autoresearch run -c "./benchmark.sh" --agent coder
+autoresearch log -d "Added caching" --agent coder
+
+# Machine-readable JSON on any command
+autoresearch run -c "./benchmark.sh" --json
+autoresearch ideas --json
+
+# List known experiments (optional registry, $AUTORESEARCH_HOME)
+autoresearch experiments
+```
+
+### Python API (pluggable runner, in-process benchmark)
+
+```python
+from autoresearch import AutoResearch
+from autoresearch.runners import CallableRunner
+
+ar = AutoResearch(name="x", metric="score", cwd=".",
+                  runner=CallableRunner(lambda: "METRIC score=42"))
+ar.init()
+ar.run("n/a")
+ar.log("callable benchmark")
 ```
 
 ### Python API

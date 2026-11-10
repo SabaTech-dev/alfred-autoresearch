@@ -2,7 +2,7 @@
 created: 2026-10-27
 owner: build (opencode)
 status: vivo
-version: 1.2.0
+version: 1.3.0
 ---
 
 # Manual de usuario — AutoResearch SDK
@@ -67,6 +67,56 @@ autoresearch export
 
 # 10. Reiniciar el experimento
 autoresearch reset --force
+```
+
+## Multi-agente y salida JSON (v1.3.0)
+
+Varios agentes pueden compartir un mismo experimento sin pisarse:
+
+```bash
+# Cada agente trabaja con su propio estado pendiente
+autoresearch run -c "./benchmark.sh" --agent coder
+autoresearch log -d "caché LRU" --agent coder
+autoresearch run -c "./benchmark.sh" --agent qa
+autoresearch log -d "paralelizado setup" --agent qa
+
+# Estado máquina con agente visible
+autoresearch status --json
+```
+
+- El pending de cada agente vive en `.autoresearch.pending.<agente>.json`;
+  los runs sin agente mantienen el nombre legado.
+- Los appends al JSONL usan un lock exclusivo (`.autoresearch.lock`): ningún
+  run se pierde por concurrencia.
+- Registry opcional: `autoresearch experiments` lista los experimentos
+  conocidos en `~/.autoresearch/registry.json` (o `$AUTORESEARCH_HOME`).
+  El registro es opcional: el modo por directorio funciona sin él.
+
+### Salida JSON para agentes
+
+`run`, `log`, `ideas` y `report` aceptan `--json` y emiten JSON sin color.
+Exit codes documentados: `0` ok, `1` sin estado (`{"error": "not_initialized"}`
+o `{"error": "no_pending_run"}`), `2` uso inválido.
+
+Un run que pasa sin reportar la métrica primaria se registra como
+`status=no-metric` (no como 0.0 silencioso).
+
+### Benchmark sin bash (Python API)
+
+```python
+from autoresearch import AutoResearch
+from autoresearch.runners import CallableRunner, CommandRunner
+
+# Benchmark como función Python, en proceso
+ar = AutoResearch(name="x", metric="score", cwd=".",
+                  runner=CallableRunner(lambda: "METRIC score=42"))
+ar.init()
+ar.run("n/a")
+ar.log("callable benchmark")
+
+# Comando fijo con entorno enriquecido
+ar = AutoResearch(name="y", metric="score", cwd=".",
+                  runner=CommandRunner("./bench", env={"MODE": "fast"}, timeout=60))
 ```
 
 ## Salida del benchmark
