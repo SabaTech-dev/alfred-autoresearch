@@ -21,6 +21,7 @@ class RunStatus(str, Enum):
     DISCARD = "discard"
     CRASH = "crash"
     PENDING = "pending"
+    NO_METRIC = "no-metric"
 
 
 class Direction(str, Enum):
@@ -48,6 +49,7 @@ class Run:
     timestamp: float
     segment: int
     confidence: float | None
+    agent: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +63,7 @@ class Run:
             "timestamp": self.timestamp,
             "segment": self.segment,
             "confidence": self.confidence,
+            "agent": self.agent,
         }
 
 
@@ -141,6 +144,7 @@ class AutoResearch:
         unit: str = "",
         cwd: str | Path | None = None,
         timeout: int = DEFAULT_TIMEOUT,
+        agent: str | None = None,
         secondary_metrics: list[SecondaryMetricDef] | None = None,
         files_in_scope: list[str] | None = None,
         off_limits: list[str] | None = None,
@@ -158,6 +162,7 @@ class AutoResearch:
             constraints=constraints or [],
         )
         self._timeout = timeout
+        self._agent = agent
         self._runs: list[Run] = []
         self._pending: Run | None = None
         self._current_segment = 0
@@ -317,9 +322,14 @@ class AutoResearch:
         # Parse metrics
         metrics = parse_metric_lines(result.combined_output)
         primary = metrics.get(self._config.metric_name, 0.0)
+        has_primary = self._config.metric_name in metrics
 
         if timed_out or not passed:
             status = RunStatus.CRASH
+        elif not has_primary:
+            # A passed run that reported no primary metric must not pollute
+            # the experiment with a silent 0.0 (P-3): mark it explicitly.
+            status = RunStatus.NO_METRIC
         else:
             status = RunStatus.PENDING
 
@@ -337,6 +347,7 @@ class AutoResearch:
             timestamp=datetime.now(timezone.utc).timestamp(),
             segment=self._current_segment,
             confidence=None,
+            agent=self._agent,
         )
 
         self._pending = run
@@ -393,6 +404,7 @@ class AutoResearch:
             timestamp=run.timestamp,
             segment=run.segment,
             confidence=run.confidence,
+            agent=run.agent,
         )
 
         # Update indices
@@ -641,6 +653,7 @@ class AutoResearch:
                     timestamp=entry.get("timestamp", 0),
                     segment=entry.get("segment", self._current_segment),
                     confidence=entry.get("confidence"),
+                    agent=entry.get("agent"),
                 )
 
                 self._runs.append(run)
@@ -679,6 +692,7 @@ class AutoResearch:
                 timestamp=data.get("timestamp", 0),
                 segment=data.get("segment", self._current_segment),
                 confidence=data.get("confidence"),
+                agent=data.get("agent"),
             )
         except (json.JSONDecodeError, KeyError):
             pass

@@ -138,7 +138,8 @@ def status(cwd: str, as_json: bool) -> None:
     state = ar.get_status()
 
     if as_json:
-        console.print_json(json.dumps(state))
+        # Plain stdout, never colorized: agents parse this output (S5).
+        click.echo(json.dumps(state))
         return
 
     if not state["initialized"]:
@@ -226,7 +227,7 @@ def export(cwd: str) -> None:
     ar = AutoResearch(cwd=Path(cwd))
     state = ar.get_status()
     state["runs"] = [r.to_dict() for r in ar.runs]
-    console.print_json(json.dumps(state))
+    click.echo(json.dumps(state))
 
 
 @main.command()

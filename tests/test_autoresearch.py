@@ -1,5 +1,7 @@
 """Tests for AutoResearch SDK."""
 
+import json
+
 import pytest
 
 from autoresearch import describe_confidence, parse_metric_lines
@@ -347,3 +349,81 @@ class TestEngine:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestAgentField:
+    """T1/S1+S4: additive `agent` field, multi-agent isolation."""
+
+    def test_run_records_agent(self, tmp_path):
+        ar = AR(name="ag-exp", metric="score", cwd=tmp_path, agent="coder")
+        ar.init()
+        ar.run('echo "METRIC score=100"')
+        run = ar.log("baseline by coder")
+        assert run.agent == "coder"
+        # JSONL line is additive-compatible
+        lines = (tmp_path / ar.RESULTS_LOG).read_text().strip().splitlines()
+        logged = json.loads(lines[-1])
+        assert logged["agent"] == "coder"
+
+    def test_default_agent_is_none(self, tmp_path):
+        ar = AR(name="ag-exp", metric="score", cwd=tmp_path)
+        ar.init()
+        ar.run('echo "METRIC score=100"')
+        run = ar.log("baseline")
+        assert run.agent is None
+        lines = (tmp_path / ar.RESULTS_LOG).read_text().strip().splitlines()
+        logged = json.loads(lines[-1])
+        assert logged["agent"] is None
+
+    def test_legacy_jsonl_without_agent_loads(self, tmp_path):
+        """AC: runs del plugin viejos sin `agent` siguen cargando."""
+        ar = AR(name="legacy", metric="score", cwd=tmp_path)
+        ar.init()
+        legacy = (
+            '{"run": 1, "commit": "abc", "metric": 90.0, "metrics": {"score": 90.0},'
+            ' "status": "keep", "baseline": true, "description": "old plugin run",'
+            ' "timestamp": 1700000000, "segment": 0, "confidence": null}\n'
+        )
+        with open(tmp_path / ar.RESULTS_LOG, "a") as f:
+            f.write(legacy)
+        ar2 = AR(cwd=tmp_path)
+        assert ar2.total_runs == 1
+        assert ar2.runs[0].agent is None
+        assert ar2.runs[0].description == "old plugin run"
+
+    def test_status_shows_agent(self, tmp_path):
+        ar = AR(name="ag-exp", metric="score", cwd=tmp_path, agent="qa")
+        ar.init()
+        ar.run('echo "METRIC score=100"')
+        ar.log("baseline")
+        state = ar.get_status()
+        assert state["last_run"]["agent"] == "qa"
+
+
+class TestNoMetricRun:
+    """T2/S7 (P-3): a passed run without METRIC is explicit, not silent 0.0."""
+
+    def test_passed_run_without_metric_is_no_metric(self, tmp_path):
+        ar = AR(name="nm-exp", metric="score", cwd=tmp_path)
+        ar.init()
+        result = ar.run("echo done")  # passes, no METRIC line
+        assert result.passed
+        run = ar.log("no metric reported")
+        assert run.status == RunStatus.NO_METRIC
+        assert run.status != RunStatus.CRASH
+
+    def test_crash_is_still_crash(self, tmp_path):
+        ar = AR(name="nm-exp", metric="score", cwd=tmp_path)
+        ar.init()
+        ar.run("exit 1")
+        run = ar.log("crashed")
+        assert run.status == RunStatus.CRASH
+
+    def test_no_metric_does_not_update_best(self, tmp_path):
+        ar = AR(name="nm-exp", metric="score", cwd=tmp_path)
+        ar.init()
+        ar.run('echo "METRIC score=100"')
+        ar.log("baseline")
+        ar.run("echo no metric here")
+        ar.log("silent run must not pollute best")
+        assert ar.best_metric == 100.0
