@@ -23,14 +23,18 @@ def main() -> None:
 
     Try ideas, keep what works, discard what doesn't, never stop.
     """
-    pass
 
 
 @main.command()
 @click.option("--name", "-n", required=True, help="Experiment name")
 @click.option("--metric", "-m", required=True, help="Primary metric name")
-@click.option("--direction", "-d", type=click.Choice(["lower", "higher"]), default="lower",
-              help="Optimize direction (lower/higher is better)")
+@click.option(
+    "--direction",
+    "-d",
+    type=click.Choice(["lower", "higher"]),
+    default="lower",
+    help="Optimize direction (lower/higher is better)",
+)
 @click.option("--unit", "-u", default="", help="Metric unit (ms, s, bytes, etc.)")
 @click.option("--reset", is_flag=True, help="Reset existing experiment")
 @click.option("--cwd", "-C", type=click.Path(exists=True), default=".", help="Working directory")
@@ -52,16 +56,41 @@ def init(name: str, metric: str, direction: str, unit: str, reset: bool, cwd: st
 @main.command()
 @click.option("--command", "-c", required=True, help="Benchmark command to run")
 @click.option("--timeout", "-t", default=600, help="Timeout in seconds")
+@click.option("--agent", "-a", default=None, help="Agent id isolating this run's pending state")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
 @click.option("--cwd", "-C", type=click.Path(exists=True), default=".", help="Working directory")
-def run(command: str, timeout: int, cwd: str) -> None:
+def run(command: str, timeout: int, agent: str | None, as_json: bool, cwd: str) -> None:
     """Run a benchmark command and capture metrics."""
-    ar = AutoResearch(cwd=Path(cwd))
+    ar = AutoResearch(cwd=Path(cwd), agent=agent)
     if not ar.is_initialized:
-        console.print("[red]✗[/red] Not initialized. Run 'autoresearch init' first.")
+        if as_json:
+            click.echo(json.dumps({"error": "not_initialized"}))
+        else:
+            console.print("[red]✗[/red] Not initialized. Run 'autoresearch init' first.")
         sys.exit(1)
 
-    console.print(f"[dim]Running: {command}[/dim]")
+    if not as_json:
+        console.print(f"[dim]Running: {command}[/dim]")
     result = ar.run(command, timeout=timeout)
+
+    if as_json:
+        from autoresearch.core.metrics import parse_metric_lines
+
+        click.echo(
+            json.dumps(
+                {
+                    "command": result.command,
+                    "exit_code": result.exit_code,
+                    "duration_seconds": result.duration_seconds,
+                    "passed": result.passed,
+                    "crashed": result.crashed,
+                    "timed_out": result.timed_out,
+                    "metrics": parse_metric_lines(result.combined_output),
+                    "has_pending": ar.has_pending,
+                }
+            )
+        )
+        return
 
     if result.timed_out:
         console.print(f"[red]✗ Timed out after {result.duration_seconds:.1f}s[/red]")
@@ -72,6 +101,7 @@ def run(command: str, timeout: int, cwd: str) -> None:
 
     # Show metrics
     from autoresearch.core.metrics import parse_metric_lines
+
     metrics = parse_metric_lines(result.combined_output)
     if metrics:
         table = Table(title="Metrics")
@@ -82,22 +112,34 @@ def run(command: str, timeout: int, cwd: str) -> None:
         console.print(table)
 
     # Show tail output
-    if result.tail_output:
-        console.print(Panel(result.tail_output, title="Output (tail)", border_style="dim"))
+    if result.tail_output():
+        console.print(Panel(result.tail_output(), title="Output (tail)", border_style="dim"))
 
-    console.print(f"\n[yellow]→ Call 'autoresearch log' to record this run[/yellow]")
+    console.print("\n[yellow]→ Call 'autoresearch log' to record this run[/yellow]")
 
 
 @main.command()
 @click.option("--description", "-d", default="", help="What was changed")
-@click.option("--status", "-s", type=click.Choice(["keep", "discard", "crash"]), default=None,
-              help="Run status (default: keep if passed)")
+@click.option(
+    "--status",
+    "-s",
+    type=click.Choice(["keep", "discard", "crash"]),
+    default=None,
+    help="Run status (default: keep if passed)",
+)
 @click.option("--idea", "-i", default="", help="Idea for future (only with discard)")
+@click.option("--agent", "-a", default=None, help="Agent id isolating this run's pending state")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
 @click.option("--cwd", "-C", type=click.Path(exists=True), default=".", help="Working directory")
-def log(description: str, status: str | None, idea: str, cwd: str) -> None:
+def log(
+    description: str, status: str | None, idea: str, agent: str | None, as_json: bool, cwd: str
+) -> None:
     """Log the pending run result."""
-    ar = AutoResearch(cwd=Path(cwd))
+    ar = AutoResearch(cwd=Path(cwd), agent=agent)
     if not ar.has_pending:
+        if as_json:
+            click.echo(json.dumps({"error": "no_pending_run"}))
+            sys.exit(1)
         console.print("[red]✗ No pending run. Run 'autoresearch run' first.[/red]")
         sys.exit(1)
 
@@ -109,21 +151,32 @@ def log(description: str, status: str | None, idea: str, cwd: str) -> None:
     else:
         logged = ar.log(description=description, status=status)
 
+    if as_json:
+        click.echo(json.dumps(logged.to_dict()))
+        return
+
     emoji = {"keep": "✅", "discard": "❌", "crash": "💥"}.get(logged.status.value, "?")
     console.print(f"{emoji} Run #{logged.run} logged — {logged.status.value}")
     console.print(f"  Metric: {logged.metric:.2f} | Baseline: {ar.baseline_metric}")
     console.print(f"  Best: {ar.best_metric}")
 
     from autoresearch.core.confidence import describe_confidence
+
     console.print(f"  {describe_confidence(ar.confidence)}")
 
 
 @main.command()
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON")
 @click.option("--cwd", "-C", type=click.Path(exists=True), default=".", help="Working directory")
-def status(cwd: str) -> None:
+def status(cwd: str, as_json: bool) -> None:
     """Show experiment status."""
     ar = AutoResearch(cwd=Path(cwd))
     state = ar.get_status()
+
+    if as_json:
+        # Plain stdout, never colorized: agents parse this output (S5).
+        click.echo(json.dumps(state))
+        return
 
     if not state["initialized"]:
         console.print("[yellow]No active experiment.[/yellow]")
@@ -141,10 +194,11 @@ def status(cwd: str) -> None:
     console.print(f"  Baseline:  {state['baseline_metric']}")
     console.print(f"  Best:      {state['best_metric']}")
     from autoresearch.core.confidence import describe_confidence
+
     console.print(f"  {describe_confidence(state['confidence'])}")
 
     if state["has_pending"]:
-        console.print(f"  [yellow]⚠ Pending run exists (run 'autoresearch log')[/yellow]")
+        console.print("  [yellow]⚠ Pending run exists (run 'autoresearch log')[/yellow]")
 
     # Recent runs
     recent = ar.runs[-10:]
@@ -156,9 +210,84 @@ def status(cwd: str) -> None:
         table.add_column("Description")
         for r in recent:
             emoji = {"keep": "✅", "discard": "❌", "crash": "💥"}.get(r.status.value, "?")
-            table.add_row(str(r.run), f"{r.metric:.2f}", f"{emoji} {r.status.value}",
-                         r.description[:50])
+            table.add_row(
+                str(r.run), f"{r.metric:.2f}", f"{emoji} {r.status.value}", r.description[:50]
+            )
         console.print(table)
+
+
+@main.command()
+@click.option("--cwd", "-C", type=click.Path(exists=True), default=".", help="Working directory")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+def ideas(cwd: str, as_json: bool) -> None:
+    """Show the ideas backlog (lessons from discarded experiments)."""
+    ar = AutoResearch(cwd=Path(cwd))
+    ideas_path = ar.cwd / ar.IDEAS_FILE
+    entries = []
+    if ideas_path.exists():
+        for line in ideas_path.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("- "):
+                entries.append(line[2:])
+
+    if as_json:
+        click.echo(json.dumps({"ideas": entries, "count": len(entries)}))
+        return
+
+    if not entries:
+        console.print(
+            "[dim]No ideas yet. Discard an experiment with --idea to grow the backlog.[/dim]"
+        )
+        return
+
+    console.print(
+        Panel(f"{len(entries)} idea(s) in the backlog", title="Ideas", border_style="yellow")
+    )
+    for i, idea in enumerate(entries, 1):
+        console.print(f"  [yellow]{i}.[/yellow] {idea}")
+
+
+@main.command()
+@click.option("--cwd", "-C", type=click.Path(exists=True), default=".", help="Working directory")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable JSON output")
+def report(cwd: str, as_json: bool) -> None:
+    """Write the session report (autoresearch.md) from recorded runs."""
+    ar = AutoResearch(cwd=Path(cwd))
+    if not ar.is_initialized:
+        if as_json:
+            click.echo(json.dumps({"error": "not_initialized"}))
+            sys.exit(1)
+        console.print("[red]✗ Not initialized. Run 'autoresearch init' first.[/red]")
+        sys.exit(1)
+
+    report_path = ar.cwd / ar.SESSION_DOC
+    report_path.write_text(ar.generate_report())
+    if as_json:
+        click.echo(json.dumps({"written": True, "path": str(report_path)}))
+        return
+    console.print(f"[green]✓[/green] Report written to {report_path}")
+
+
+@main.command()
+@click.option("--cwd", "-C", type=click.Path(exists=True), default=".", help="Working directory")
+def experiments(cwd: str) -> None:
+    """List known experiments from the optional registry."""
+    from autoresearch.registry import list_experiments
+
+    entries = list_experiments()
+    if not entries:
+        console.print("[dim]No registered experiments.[/dim]")
+        return
+    table = Table(title="Experiments")
+    table.add_column("Name", style="cyan")
+    table.add_column("Metric", style="green")
+    table.add_column("Updated", style="dim")
+    table.add_column("Directory", style="dim")
+    for e in entries:
+        table.add_row(
+            e.get("name") or "-", e.get("metric_name") or "-", e.get("updated_at", ""), e["cwd"]
+        )
+    console.print(table)
 
 
 @main.command()
@@ -168,7 +297,7 @@ def export(cwd: str) -> None:
     ar = AutoResearch(cwd=Path(cwd))
     state = ar.get_status()
     state["runs"] = [r.to_dict() for r in ar.runs]
-    console.print_json(json.dumps(state))
+    click.echo(json.dumps(state))
 
 
 @main.command()
@@ -176,9 +305,8 @@ def export(cwd: str) -> None:
 @click.option("--force", is_flag=True, help="Reset without confirmation")
 def reset(cwd: str, force: bool) -> None:
     """Reset the experiment."""
-    if not force:
-        if not click.confirm("Reset all experiment data?"):
-            return
+    if not force and not click.confirm("Reset all experiment data?"):
+        return
     ar = AutoResearch(cwd=Path(cwd))
     ar.reset()
     console.print("[green]✓ Experiment reset.[/green]")

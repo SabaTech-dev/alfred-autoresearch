@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
-import os
-import signal
 import subprocess
-import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal
 
-from autoresearch.core.confidence import compute_confidence
+if TYPE_CHECKING:
+    from autoresearch.runners import Runner
+
+from autoresearch.core.confidence import compute_confidence, describe_confidence
 from autoresearch.core.metrics import parse_metric_lines
 
 
@@ -22,6 +24,7 @@ class RunStatus(str, Enum):
     DISCARD = "discard"
     CRASH = "crash"
     PENDING = "pending"
+    NO_METRIC = "no-metric"
 
 
 class Direction(str, Enum):
@@ -38,6 +41,7 @@ class SecondaryMetricDef:
 @dataclass
 class Run:
     """A single experiment run."""
+
     run: int
     commit: str
     metric: float
@@ -48,6 +52,7 @@ class Run:
     timestamp: float
     segment: int
     confidence: float | None
+    agent: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,12 +66,14 @@ class Run:
             "timestamp": self.timestamp,
             "segment": self.segment,
             "confidence": self.confidence,
+            "agent": self.agent,
         }
 
 
 @dataclass
 class ExperimentConfig:
     """Experiment configuration."""
+
     name: str | None = None
     metric_name: str = "metric"
     metric_unit: str = ""
@@ -89,6 +96,7 @@ class ExperimentConfig:
 @dataclass
 class ExecutionResult:
     """Result of running a command."""
+
     command: str
     exit_code: int | None
     duration_seconds: float
@@ -103,8 +111,8 @@ class ExecutionResult:
         parts = [self.stdout, self.stderr]
         return "\n".join(p for p in parts if p.strip())
 
-    @property
     def tail_output(self, lines: int = 80) -> str:
+        """Return the last ``lines`` lines of combined output."""
         combined = self.combined_output
         if not combined:
             return ""
@@ -130,6 +138,7 @@ class AutoResearch:
     IDEAS_FILE = "autoresearch.ideas.md"
     SESSION_DOC = "autoresearch.md"
     CHECKPOINT_FILE = "autoresearch.checkpoint.json"
+    LOCK_FILE = ".autoresearch.lock"
 
     def __init__(
         self,
@@ -139,6 +148,8 @@ class AutoResearch:
         unit: str = "",
         cwd: str | Path | None = None,
         timeout: int = DEFAULT_TIMEOUT,
+        agent: str | None = None,
+        runner: Runner | None = None,
         secondary_metrics: list[SecondaryMetricDef] | None = None,
         files_in_scope: list[str] | None = None,
         off_limits: list[str] | None = None,
@@ -156,6 +167,10 @@ class AutoResearch:
             constraints=constraints or [],
         )
         self._timeout = timeout
+        self._agent = agent
+        from autoresearch.runners import SubprocessRunner
+
+        self._runner: Runner = runner if runner is not None else SubprocessRunner()
         self._runs: list[Run] = []
         self._pending: Run | None = None
         self._current_segment = 0
@@ -241,6 +256,9 @@ class AutoResearch:
         # Write config entry
         self._append_results(self._config.to_dict())
         self._initialized = True
+        from autoresearch.registry import register
+
+        register(self._cwd, self._config.name, self._config.metric_name)
 
     def run(
         self,
@@ -272,38 +290,19 @@ class AutoResearch:
             raise RuntimeError("Pending run exists. Call log() first.")
 
         timeout = timeout or self._timeout
-        cmd_env = os.environ.copy()
-        if env:
-            cmd_env.update(env)
+        result = self._runner.execute(command, timeout=timeout, cwd=self._cwd, env=env)
 
-        started = time.monotonic()
-        try:
-            proc = subprocess.run(
-                ["bash", "-c", command],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=str(self._cwd),
-                env=cmd_env,
-            )
-            exit_code = proc.returncode
-            timed_out = False
-            stdout = proc.stdout
-            stderr = proc.stderr
-        except subprocess.TimeoutExpired as e:
-            exit_code = None
-            timed_out = True
-            stdout = e.stdout or ""
-            stderr = e.stderr or ""
-
-        duration = time.monotonic() - started
-        passed = exit_code == 0 and not timed_out
-        crashed = not passed
+        exit_code = result.exit_code
+        timed_out = result.timed_out
+        stdout = result.stdout
+        stderr = result.stderr
+        passed = result.passed
+        crashed = result.crashed
 
         result = ExecutionResult(
             command=command,
             exit_code=exit_code,
-            duration_seconds=duration,
+            duration_seconds=result.duration_seconds,
             passed=passed,
             crashed=crashed,
             timed_out=timed_out,
@@ -314,11 +313,14 @@ class AutoResearch:
         # Parse metrics
         metrics = parse_metric_lines(result.combined_output)
         primary = metrics.get(self._config.metric_name, 0.0)
+        has_primary = self._config.metric_name in metrics
 
-        if timed_out:
+        if timed_out or not passed:
             status = RunStatus.CRASH
-        elif not passed:
-            status = RunStatus.CRASH
+        elif not has_primary:
+            # A passed run that reported no primary metric must not pollute
+            # the experiment with a silent 0.0 (P-3): mark it explicitly.
+            status = RunStatus.NO_METRIC
         else:
             status = RunStatus.PENDING
 
@@ -336,6 +338,7 @@ class AutoResearch:
             timestamp=datetime.now(timezone.utc).timestamp(),
             segment=self._current_segment,
             confidence=None,
+            agent=self._agent,
         )
 
         self._pending = run
@@ -371,34 +374,29 @@ class AutoResearch:
         self._pending = None
         self._clear_pending()
 
-        # Override fields if provided
-        if description:
-            run = Run(
-                run=run.run,
-                commit=commit or run.commit,
-                metric=metric if metric is not None else run.metric,
-                metrics=run.metrics,
-                status=RunStatus(status) if status else (RunStatus.KEEP if run.status == RunStatus.PENDING else RunStatus.CRASH),
-                baseline=run.baseline,
-                description=description,
-                timestamp=run.timestamp,
-                segment=run.segment,
-                confidence=run.confidence,
-            )
-        elif run.status == RunStatus.PENDING:
-            # Default to keep if command passed
-            run = Run(
-                run=run.run,
-                commit=commit or run.commit,
-                metric=run.metric,
-                metrics=run.metrics,
-                status=RunStatus.KEEP,
-                baseline=run.baseline,
-                description=description or "No description",
-                timestamp=run.timestamp,
-                segment=run.segment,
-                confidence=run.confidence,
-            )
+        # Resolve the final status: explicit status wins; otherwise keep a
+        # pending (passed) run as KEEP and preserve CRASH as-is.
+        final_status = (
+            RunStatus(status)
+            if status is not None
+            else (RunStatus.KEEP if run.status == RunStatus.PENDING else run.status)
+        )
+        final_description = description or (
+            "No description" if final_status == RunStatus.KEEP else ""
+        )
+        run = Run(
+            run=run.run,
+            commit=commit or run.commit,
+            metric=metric if metric is not None else run.metric,
+            metrics=run.metrics,
+            status=final_status,
+            baseline=run.baseline,
+            description=final_description,
+            timestamp=run.timestamp,
+            segment=run.segment,
+            confidence=run.confidence,
+            agent=run.agent,
+        )
 
         # Update indices
         self._current_run_index += 1
@@ -408,9 +406,12 @@ class AutoResearch:
         if run.baseline or self._baseline_metric is None:
             self._baseline_metric = run.metric
 
-        if run.status == RunStatus.KEEP and run.metric > 0:
-            if self._best_metric is None or self._is_better(run.metric, self._best_metric):
-                self._best_metric = run.metric
+        if (
+            run.status == RunStatus.KEEP
+            and run.metric > 0
+            and (self._best_metric is None or self._is_better(run.metric, self._best_metric))
+        ):
+            self._best_metric = run.metric
 
         # Compute confidence
         self._confidence = self._compute_confidence()
@@ -479,12 +480,29 @@ class AutoResearch:
 
     # --- Internal ---
 
+    @contextmanager
+    def _locked(self):
+        """Exclusive inter-process lock around state mutations (fcntl).
+
+        Multiple agents sharing one experiment directory interleave appends
+        and pending read-modify-write; the lock keeps those atomic.
+        """
+        lock_path = self._cwd / self.LOCK_FILE
+        with open(lock_path, "a") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+    def _pending_path(self) -> Path:
+        """Pending file for this agent; agentless runs keep the legacy name."""
+        if self._agent:
+            return self._cwd / f".autoresearch.pending.{self._agent}.json"
+        return self._cwd / ".autoresearch.pending.json"
+
     def _is_better(self, current: float, best: float) -> bool:
-        return (
-            current < best
-            if self._config.best_direction == Direction.LOWER
-            else current > best
-        )
+        return current < best if self._config.best_direction == Direction.LOWER else current > best
 
     def _compute_confidence(self) -> float | None:
         confidence_runs = [
@@ -502,6 +520,7 @@ class AutoResearch:
                 text=True,
                 cwd=str(self._cwd),
                 timeout=5,
+                check=False,  # missing git repo is a valid outcome ("")
             )
             if result.returncode == 0:
                 return result.stdout.strip()
@@ -511,13 +530,52 @@ class AutoResearch:
 
     def _append_results(self, entry: dict[str, Any]) -> None:
         path = self._cwd / self.RESULTS_LOG
-        with open(path, "a") as f:
+        with self._locked(), open(path, "a") as f:
             f.write(json.dumps(entry) + "\n")
 
     def _append_idea(self, idea: str) -> None:
+        """Append an idea to the backlog, skipping exact duplicates."""
+        idea = idea.strip()
+        if not idea:
+            return
         path = self._cwd / self.IDEAS_FILE
+        existing = path.read_text() if path.exists() else ""
+        if idea in existing:
+            return
         with open(path, "a") as f:
             f.write(f"- {idea}\n")
+
+    def generate_report(self) -> str:
+        """
+        Render the experiment session as a Markdown document.
+
+        Mirrors the OpenClaw AutoResearch plugin's autoresearch.md format.
+
+        Raises:
+            RuntimeError: If experiment not initialized.
+        """
+        if not self._initialized:
+            raise RuntimeError("Not initialized. Call init() first.")
+
+        unit_part = f"{self._config.metric_unit}, " if self._config.metric_unit else ""
+        direction = f"{self._config.best_direction.value} is better"
+        lines = [
+            f"# Autoresearch: {self._config.name or 'experiment'}",
+            "",
+            "## Metrics",
+            f"- **Primary**: {self._config.metric_name} ({unit_part}{direction})",
+            "",
+            "## Summary",
+            f"- Total runs: {self._total_runs} (segment {self._current_segment})",
+            f"- Baseline: {self._baseline_metric} | Best: {self._best_metric}",
+            f"- {describe_confidence(self._confidence)}",
+            "",
+            "## What's Been Tried",
+        ]
+        for r in self._runs:
+            metric = f"{r.metric:.2f}" if isinstance(r.metric, (int, float)) else r.metric
+            lines.append(f"- #{r.run} {r.status.value} {metric} {r.commit} — {r.description}")
+        return "\n".join(lines) + "\n"
 
     def _update_checkpoint(self) -> None:
         path = self._cwd / self.CHECKPOINT_FILE
@@ -537,14 +595,15 @@ class AutoResearch:
             json.dump(checkpoint, f, indent=2)
 
     def _persist_pending(self, run: Run) -> None:
-        path = self._cwd / ".autoresearch.pending.json"
-        with open(path, "w") as f:
+        path = self._pending_path()
+        with self._locked(), open(path, "w") as f:
             json.dump(run.to_dict(), f, indent=2)
 
     def _clear_pending(self) -> None:
-        path = self._cwd / ".autoresearch.pending.json"
-        if path.exists():
-            path.unlink()
+        path = self._pending_path()
+        with self._locked():
+            if path.exists():
+                path.unlink()
 
     def _load_state(self) -> None:
         """Load existing state from results log and checkpoint."""
@@ -563,17 +622,22 @@ class AutoResearch:
                     continue
 
                 if entry.get("type") == "config":
-                    if entry.get("name"):
-                        self._config = ExperimentConfig(
-                            name=entry.get("name"),
-                            metric_name=entry.get("metricName", "metric"),
-                            metric_unit=entry.get("metricUnit", ""),
-                            best_direction=Direction(entry.get("bestDirection", "lower")),
-                            secondary_metrics=self._config.secondary_metrics,
-                            files_in_scope=self._config.files_in_scope,
-                            off_limits=self._config.off_limits,
-                            constraints=self._config.constraints,
-                        )
+                    # Restore config from the file regardless of whether a
+                    # name was persisted: unnamed experiments must resume
+                    # with the same metric/direction they were created with,
+                    # not with whatever the new constructor call passed.
+                    self._config = ExperimentConfig(
+                        name=entry.get("name") or self._config.name,
+                        metric_name=entry.get("metricName", self._config.metric_name),
+                        metric_unit=entry.get("metricUnit", self._config.metric_unit),
+                        best_direction=Direction(
+                            entry.get("bestDirection", self._config.best_direction.value)
+                        ),
+                        secondary_metrics=self._config.secondary_metrics,
+                        files_in_scope=self._config.files_in_scope,
+                        off_limits=self._config.off_limits,
+                        constraints=self._config.constraints,
+                    )
                     if self._total_runs > 0:
                         self._current_segment += 1
                     self._current_run_index = 0
@@ -602,6 +666,7 @@ class AutoResearch:
                     timestamp=entry.get("timestamp", 0),
                     segment=entry.get("segment", self._current_segment),
                     confidence=entry.get("confidence"),
+                    agent=entry.get("agent"),
                 )
 
                 self._runs.append(run)
@@ -609,16 +674,21 @@ class AutoResearch:
                 if self._baseline_metric is None:
                     self._baseline_metric = run.metric
 
-                if run.status == RunStatus.KEEP and run.metric > 0:
-                    if self._best_metric is None or self._is_better(run.metric, self._best_metric):
-                        self._best_metric = run.metric
+                if (
+                    run.status == RunStatus.KEEP
+                    and run.metric > 0
+                    and (
+                        self._best_metric is None or self._is_better(run.metric, self._best_metric)
+                    )
+                ):
+                    self._best_metric = run.metric
 
             self._confidence = self._compute_confidence()
         # Load pending run if exists
         self._load_pending()
 
     def _load_pending(self) -> None:
-        path = self._cwd / ".autoresearch.pending.json"
+        path = self._pending_path()
         if not path.exists():
             return
         try:
@@ -635,6 +705,7 @@ class AutoResearch:
                 timestamp=data.get("timestamp", 0),
                 segment=data.get("segment", self._current_segment),
                 confidence=data.get("confidence"),
+                agent=data.get("agent"),
             )
         except (json.JSONDecodeError, KeyError):
             pass

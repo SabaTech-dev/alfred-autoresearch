@@ -1,5 +1,5 @@
 """
-AutoResearch SDK v1.1 — Standalone Python SDK for autonomous experiment loops.
+AutoResearch SDK v1.2 — Standalone Python SDK for autonomous experiment loops.
 
 Inspired by karpathy/autoresearch: try ideas, keep what works, discard what doesn't, never stop.
 
@@ -19,11 +19,11 @@ Usage:
     ar.log("Baseline measurement")  # Log result
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __author__ = "Jose Manuel Sabarís García"
 
-from autoresearch.core.engine import AutoResearch
 from autoresearch.core.confidence import compute_confidence, describe_confidence
+from autoresearch.core.engine import AutoResearch
 from autoresearch.core.metrics import parse_metric_lines
 
 __all__ = [
